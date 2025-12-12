@@ -11,7 +11,7 @@ client = OpenAI(
 )
 
 
-def inference(model_url: str, content: str):
+def inference(model_url: str, content: str, temperature: float = 1.0):
     response = client.chat.completions.create(
         extra_headers={
             "HTTP-Referer": "<YOUR_SITE_URL>",
@@ -19,5 +19,6 @@ def inference(model_url: str, content: str):
         },
         model=model_url,
         messages=[{"role": "user", "content": content}],
+        temperature=temperature,
     )
     return response

@@ -9,8 +9,9 @@ app = cyclopts.App()
 def main(
     model_url: str = "deepseek/deepseek-v3.2",
     content: str = "how many r's are in the word strawberry?",
+    temperature: float = 1.0,
 ):
-    response = inference(model_url=model_url, content=content)
+    response = inference(model_url=model_url, content=content, temperature=temperature)
     print(response)
 
 
