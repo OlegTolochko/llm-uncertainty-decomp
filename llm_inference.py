@@ -14,6 +14,16 @@ if not _api_key:
 
 client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=_api_key)
 
+@dataclass
+class InferenceResult:
+    text: str
+    finish_reason: Optional[str]
+    model: Optional[str]
+    provider: Optional[str]
+    usage: Optional[Dict[str, Any]]
+    cost: Optional[float]
+    raw: Any
+
 
 def inference(
     model_url: str,
@@ -33,17 +43,41 @@ def inference(
 
     if system:
         messages = [{"role": "system", "content": system}] + messages
+    try:
+        response = client.chat.completions.create(
+            extra_headers={
+                "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", ""),
+                "X-Title": os.getenv("OPENROUTER_SITE_NAME", ""),
+            },
+            model=model_url,
+            messages=messages,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+            n=n,
+        )
+        choice0 = response.choices[0]
+        text = (choice0.message.content or "").strip()
+        usage = None
+        cost = None
+        provider = None
+        model = getattr(response, "model", None)
 
-    response = client.chat.completions.create(
-        extra_headers={
-            "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", ""),
-            "X-Title": os.getenv("OPENROUTER_SITE_NAME", ""),
-        },
-        model=model_url,
-        messages=messages,
-        temperature=temperature,
-        top_p=top_p,
-        max_tokens=max_tokens,
-        n=n,
-    )
-    return response
+        usage_obj = getattr(response, "usage", None)
+        if usage_obj is not None:
+            usage = usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else dict(usage_obj)
+            cost = usage.get("cost")
+
+        provider = getattr(response, "provider", None)
+
+        return InferenceResult(
+            text=text,
+            finish_reason=getattr(choice0, "finish_reason", None),
+            model=model,
+            provider=provider,
+            usage=usage,
+            cost=cost,
+            raw=response,
+        )
+    except Exception as e:
+        raise
