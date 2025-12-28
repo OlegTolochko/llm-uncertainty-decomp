@@ -8,7 +8,7 @@ app = cyclopts.App()
 
 @app.command()
 def main(
-    model_url: str = "deepseek/deepseek-v3.2",
+    model_url: str = "google/gemini-3-flash-preview",
     content: str = "how many r's are in the word strawberry?",
     temperature: float = 0.0,
     max_tokens: int = 256,

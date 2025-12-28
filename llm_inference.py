@@ -67,7 +67,7 @@ def inference(
         usage_obj = getattr(response, "usage", None)
         if usage_obj is not None:
             usage = (
-                    usage_obj.model_dump()
+                usage_obj.model_dump()
                 if hasattr(usage_obj, "model_dump")
                 else dict(usage_obj)
             )
