@@ -85,4 +85,4 @@ def inference(
     ]
 
     # Return single result if n=1, list otherwise
-    return results[0] if n == 1 else results
+    return results[0] if len(results) == 1 else results
