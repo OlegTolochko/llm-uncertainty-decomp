@@ -78,7 +78,7 @@ def inference(
             model=model,
             provider=provider,
             usage=usage,
-            cost=cost, # Total cost
+            cost=cost,  # Total cost
             raw=response,
         )
         for choice in response.choices
