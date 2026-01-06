@@ -1,6 +1,5 @@
-import json
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
 
 from dotenv import load_dotenv
@@ -36,7 +35,7 @@ def inference(
     top_p: float = 1.0,
     max_tokens: Optional[int] = None,
     n: int = 1,
-):
+) -> Union[InferenceResult, List[InferenceResult]]:
     if messages is None:
         if content is None:
             raise ValueError("Provide either `content` or `messages`.")
@@ -44,45 +43,46 @@ def inference(
 
     if system:
         messages = [{"role": "system", "content": system}] + messages
-    try:
-        response = client.chat.completions.create(
-            extra_headers={
-                "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", ""),
-                "X-Title": os.getenv("OPENROUTER_SITE_NAME", ""),
-            },
-            model=model_url,
-            messages=messages,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            n=n,
+
+    response = client.chat.completions.create(
+        extra_headers={
+            "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", ""),
+            "X-Title": os.getenv("OPENROUTER_SITE_NAME", ""),
+        },
+        model=model_url,
+        messages=messages,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+        n=n,
+    )
+
+    model = getattr(response, "model", None)
+    provider = getattr(response, "provider", None)
+    usage = None
+    cost = None
+
+    usage_obj = getattr(response, "usage", None)
+    if usage_obj is not None:
+        usage = (
+            usage_obj.model_dump()
+            if hasattr(usage_obj, "model_dump")
+            else dict(usage_obj)
         )
-        choice0 = response.choices[0]
-        text = (choice0.message.content or "").strip()
-        usage = None
-        cost = None
-        provider = None
-        model = getattr(response, "model", None)
+        cost = usage.get("cost")
 
-        usage_obj = getattr(response, "usage", None)
-        if usage_obj is not None:
-            usage = (
-                usage_obj.model_dump()
-                if hasattr(usage_obj, "model_dump")
-                else dict(usage_obj)
-            )
-            cost = usage.get("cost")
-
-        provider = getattr(response, "provider", None)
-
-        return InferenceResult(
-            text=text,
-            finish_reason=getattr(choice0, "finish_reason", None),
+    results = [
+        InferenceResult(
+            text=(choice.message.content or "").strip(),
+            finish_reason=getattr(choice, "finish_reason", None),
             model=model,
             provider=provider,
             usage=usage,
-            cost=cost,
+            cost=cost, # Total cost
             raw=response,
         )
-    except Exception as e:
-        raise
+        for choice in response.choices
+    ]
+
+    # Return single result if n=1, list otherwise
+    return results[0] if n == 1 else results
