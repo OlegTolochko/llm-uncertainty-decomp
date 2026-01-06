@@ -111,6 +111,16 @@ def process_outer_loop(all_outputs_embedded: List[np.ndarray], gamma: float = 1.
     return outer_eigenvalues
 
 
+def compute_uncertainties(
+    inner_eigenvalues: List[np.ndarray], outer_eigenvalues: np.ndarray, n: int
+):
+    aleatoric = (1 / n) * (
+        np.sum(inner_eigenvalues * np.log(inner_eigenvalues))
+    ) - np.sum(outer_eigenvalues * np.log(outer_eigenvalues))
+    epistemic = -(1 / n) * np.sum(inner_eigenvalues * np.log(inner_eigenvalues))
+    return aleatoric, epistemic
+
+
 def pipeline(query: str, sys_prompt_clarify: str, sys_prompt_answer: str):
     W_clarifications = process_ambigQA(query, sys_prompt_clarify)
 
@@ -121,5 +131,11 @@ def pipeline(query: str, sys_prompt_clarify: str, sys_prompt_answer: str):
         target_llm="google/gemini-3-flash-preview",
     )
     outer_eigenvalues = process_outer_loop(all_outputs_embedded)
+    n = len(all_outputs_embedded)
+    aleatoric, epistemic = compute_uncertainties(
+        inner_eigenvalues=inner_eigenvalues, outer_eigenvalues=outer_eigenvalues, n=n
+    )
+    print(f"Aleatoric Uncertainty: {aleatoric}")
+    print(f"Epistemic Uncertainty: {epistemic}")
 
-    return all_outputs_embedded, inner_matrices, inner_eigenvalues, outer_eigenvalues
+    return aleatoric, epistemic
