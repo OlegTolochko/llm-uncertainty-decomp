@@ -1,7 +1,8 @@
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import re
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from sentence_transformers import SentenceTransformer
 import numpy as np
@@ -35,8 +36,8 @@ class PipelineResult:
             "clarifications": self.clarifications,
             "model_answers": self.model_answers,
             "ground_truth_answers": self.ground_truth_answers,
-            "aleatoric": self.aleatoric,
-            "epistemic": self.epistemic,
+            "aleatoric": float(self.aleatoric),
+            "epistemic": float(self.epistemic),
         }
 
 
@@ -62,46 +63,42 @@ def generate_clarifications(
 def process_clarifications(
     clarifications: List[str],
     sys_prompt: str,
-    target_llm: str = "google/gemini-3-flash-preview",
-    m: int = 3,
-    temperature: float = 0.0,
+    target_llm: str,
+    m: int,
+    temperature: float,
+    max_workers: int = 16,
 ):
-    all_outputs_embedded = []
-    all_outputs_text = []
-    similarity_matrices = []
-    similarity_eigenvalues = []
-    for clarification in clarifications:
-        user_content = f"Task\nQuestion: {clarification}"
+    n = len(clarifications)
 
-        # n=m first, fall back to multiple calls if provider doesn't support n>1
-        outputs_raw = inference(
+    def call_one(i: int, j: int) -> Tuple[int, int, str]:
+        user_content = f"Task\nQuestion: {clarifications[i]}"
+        r = inference(
             model_url=target_llm,
             content=user_content,
             system=sys_prompt,
-            n=m,
+            n=1,
             temperature=temperature,
         )
+        return i, j, r.text
 
-        if isinstance(outputs_raw, list):
-            outputs_text = [r.text for r in outputs_raw]
-        else:
-            # Provider returned single result despite n>1 request
-            outputs_text = [outputs_raw.text]
-            for _ in range(m - 1):
-                additional = inference(
-                    model_url=target_llm,
-                    content=user_content,
-                    system=sys_prompt,
-                    n=1,
-                    temperature=temperature,
-                )
-                outputs_text.append(additional.text)
+    all_outputs_text: List[List[str]] = [[""] * m for _ in range(n)]
 
-        all_outputs_text.append(outputs_text)
-        outputs_embedded = embed_sentences(outputs_text)  # (m, embed_dim)
-        similarity_matrix = compute_similarity_matrix(outputs_embedded)  # (m, m)
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = [ex.submit(call_one, i, j) for i in range(n) for j in range(m)]
+        for fut in as_completed(futures):
+            i, j, text = fut.result()
+            all_outputs_text[i][j] = text
 
-        sim_matrix_norm = 1 / outputs_embedded.shape[0] * similarity_matrix
+    all_outputs_embedded = []
+    similarity_matrices = []
+    similarity_eigenvalues = []
+
+    for i in range(n):
+        outputs_text = all_outputs_text[i]
+        outputs_embedded = embed_sentences(outputs_text)
+        similarity_matrix = compute_similarity_matrix(outputs_embedded)
+
+        sim_matrix_norm = (1 / outputs_embedded.shape[0]) * similarity_matrix
         sim_eig_values = np.linalg.eigvalsh(sim_matrix_norm)
         sim_eig_values = np.maximum(sim_eig_values, 1e-10)
 
@@ -152,7 +149,9 @@ def parse_ambigqa_response(response_text: str, original_query: str) -> List[str]
         return [original_query]
 
     cleaned_clarifications = [m.strip() for m in matches if m.strip()]
-
+    cleaned_clarifications = cleaned_clarifications[
+        :10
+    ]  # Limit to first 10 clarifications
     return cleaned_clarifications
 
 
@@ -230,16 +229,16 @@ def pipeline_on_ambigqa_item(
     clarification_llm: str = "google/gemini-3-flash-preview",
     target_llm: str = "google/gemini-3-flash-preview",
     m: int = 3,
-    temperature: float = 0.0,
+    temperature: float = 0.5,
 ) -> PipelineResult:
     """Run the uncertainty pipeline on a single AmbigQA item."""
 
-    # Step 1: Generate clarifications from the original question
+    # 1: Generate clarifications from the original question
     W_clarifications = process_ambigQA(
         item.question, sys_prompt_clarify, clarification_llm=clarification_llm
     )
 
-    # Step 2: Get m samples for each clarification
+    # 2: Get m samples for each clarification
     all_outputs_embedded, all_outputs_text, _, inner_eigenvalues = (
         process_clarifications(
             clarifications=W_clarifications,
@@ -250,10 +249,10 @@ def pipeline_on_ambigqa_item(
         )
     )
 
-    # Step 3: Compute outer similarity
+    # 3: Compute outer similarity
     outer_eigenvalues = process_outer_loop(all_outputs_embedded)
 
-    # Step 4: Compute uncertainties
+    # 4: Compute uncertainties
     n = len(all_outputs_embedded)
     aleatoric, epistemic = compute_uncertainties(
         inner_eigenvalues=inner_eigenvalues, outer_eigenvalues=outer_eigenvalues, n=n
@@ -272,14 +271,18 @@ def pipeline_on_ambigqa_item(
 
 
 def run_ambigqa_evaluation(
+    sys_prompt_clarify: str,
+    sys_prompt_answer: str,
     split: str = "dev",
     start_index: int = 0,
     limit: Optional[int] = 10,
-    sys_prompt_clarify: str = "",
-    sys_prompt_answer: str = "Answer concisely.",
     output_file: Optional[str] = None,
     only_ambiguous: bool = False,
     only_unambiguous: bool = False,
+    temperature: float = 0.5,
+    m: int = 10,
+    target_llm: str = "google/gemini-3-flash-preview",
+    clarification_llm: str = "google/gemini-3-flash-preview",
 ) -> List[PipelineResult]:
     """Run the pipeline on AmbigQA dataset and collect results.
 
@@ -292,11 +295,12 @@ def run_ambigqa_evaluation(
         output_file: Path to save results as JSON (optional)
         only_ambiguous: Filter to only ambiguous questions
         only_unambiguous: Filter to only unambiguous questions
+        temperature: Temperature for the model
+        m: Number of samples to generate for each clarification
 
     Returns:
         List of PipelineResult objects
     """
-    # Load dataset
     data = load_ambigqa(split)
 
     if only_ambiguous:
@@ -304,7 +308,6 @@ def run_ambigqa_evaluation(
     elif only_unambiguous:
         data = filter_unambiguous(data)
 
-    # Apply start_index and limit
     if limit is not None:
         data = data[start_index : start_index + limit]
     else:
@@ -323,6 +326,10 @@ def run_ambigqa_evaluation(
                 item=item,
                 sys_prompt_clarify=sys_prompt_clarify,
                 sys_prompt_answer=sys_prompt_answer,
+                temperature=temperature,
+                m=m,
+                target_llm=target_llm,
+                clarification_llm=clarification_llm,
             )
             results.append(result)
 
@@ -335,7 +342,7 @@ def run_ambigqa_evaluation(
             print(f"  ERROR: {e}")
             continue
 
-    # Save results if output file specified
+    # Saves results if output file is provided
     if output_file:
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump([r.to_dict() for r in results], f, indent=2, ensure_ascii=False)
@@ -347,7 +354,6 @@ def run_ambigqa_evaluation(
         print("=" * 50)
         ambig_results = [r for r in results if r.is_ambiguous]
         unambig_results = [r for r in results if not r.is_ambiguous]
-        print(f"Model Answers: {results[0].model_answers}")
 
         if ambig_results:
             avg_aleatoric = np.mean([r.aleatoric for r in ambig_results])
@@ -364,15 +370,3 @@ def run_ambigqa_evaluation(
             print(f"  Avg Epistemic: {avg_epistemic:.4f}")
 
     return results
-
-
-if __name__ == "__main__":
-    sys_prompt_clarify = ambigqa_clarification_sys_prompt
-    sys_prompt_answer = ambigqa_target_sys_prompt
-    run_ambigqa_evaluation(
-        split="dev",
-        limit=5,
-        start_index=1,
-        sys_prompt_clarify=sys_prompt_clarify,
-        sys_prompt_answer=sys_prompt_answer,
-    )
