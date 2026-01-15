@@ -55,7 +55,7 @@ def process_clarifications(
     max_workers: int = 16,
 ) -> List[List[str]]:
     """Generate m answer samples for each clarification.
-    
+
     Returns:
         all_outputs_text: List of lists, shape [n_clarifications][m_samples]
     """
@@ -251,7 +251,9 @@ def run_ambigqa_evaluation(
 
             print(f"  Ambiguous: {result.is_ambiguous}")
             print(f"  Clarifications: {len(result.clarifications)}")
-            print(f"  Answers per clarification: {len(result.model_answers[0]) if result.model_answers else 0}")
+            print(
+                f"  Answers per clarification: {len(result.model_answers[0]) if result.model_answers else 0}"
+            )
 
         except Exception as e:
             print(f"  ERROR: {e}")

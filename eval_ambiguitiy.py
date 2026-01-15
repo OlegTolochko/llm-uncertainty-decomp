@@ -8,10 +8,18 @@ from sentence_transformers import SentenceTransformer
 import torch
 
 from spectral_uncertainty import compute_spectral_uncertainty_from_embeddings
-from semantic_entropy import get_semantic_ids, cluster_assignment_entropy, EntailmentDeberta
+from semantic_entropy import (
+    get_semantic_ids,
+    cluster_assignment_entropy,
+    EntailmentDeberta,
+)
 
 _model: SentenceTransformer | None = None
-DEVICE = "mps" if torch.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = (
+    "mps"
+    if torch.mps.is_available()
+    else ("cuda" if torch.cuda.is_available() else "cpu")
+)
 
 
 def load_results(json_file: str) -> list[dict]:
@@ -24,16 +32,18 @@ def get_model() -> SentenceTransformer:
     """Lazy load the sentence transformer model."""
     global _model
     if _model is None:
-        _model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2", device=DEVICE)
+        _model = SentenceTransformer(
+            "sentence-transformers/all-mpnet-base-v2", device=DEVICE
+        )
     return _model
 
 
 def embed_sentences(sentences: List[str]) -> np.ndarray:
     """Embed sentences using SentenceTransformer.
-    
+
     Args:
         sentences: List of sentences to embed
-        
+
     Returns:
         Array of shape (n_sentences, embed_dim)
     """
@@ -44,10 +54,10 @@ def embed_sentences(sentences: List[str]) -> np.ndarray:
 
 def embed_model_answers(model_answers: List[List[str]]) -> List[np.ndarray]:
     """Embed all model answers for a single item.
-    
+
     Args:
         model_answers: List of lists, shape [n_clarifications][m_samples]
-        
+
     Returns:
         List of embedding arrays, shape [n_clarifications] where each is (m_samples, embed_dim)
     """
@@ -65,7 +75,9 @@ def compute_spectral_scores(data: list[dict]) -> np.ndarray:
         model_answers = item.get("model_answers", [])
         if model_answers and all(len(answers) > 0 for answers in model_answers):
             answer_embeddings = embed_model_answers(model_answers)
-            aleatoric, _ = compute_spectral_uncertainty_from_embeddings(answer_embeddings)
+            aleatoric, _ = compute_spectral_uncertainty_from_embeddings(
+                answer_embeddings
+            )
             scores.append(aleatoric)
         else:
             scores.append(0.0)
@@ -88,6 +100,7 @@ def compute_input_clarification_ensembling_scores(data: list[dict]) -> np.ndarra
             scores.append(0.0)
     return np.array(scores)
 
+
 def evaluate_ambiguity(json_file: str):
     """Evaluate ambiguity detection using different uncertainty methods."""
     data = load_results(json_file)
@@ -108,11 +121,20 @@ def evaluate_ambiguity(json_file: str):
     )
 
     print("\nComputing Input Clarifaction Ensembling Scores (using Semantic Entropy)")
-    input_clarifaction_ensembling_scores = compute_input_clarification_ensembling_scores(data)
-    eval_uncertainty(y_true=y_true, y_scores=input_clarifaction_ensembling_scores, method="Input Clarifaction Ensembling (aleatoric)", short_name="input_clarifaction_ensembling")
+    input_clarifaction_ensembling_scores = (
+        compute_input_clarification_ensembling_scores(data)
+    )
+    eval_uncertainty(
+        y_true=y_true,
+        y_scores=input_clarifaction_ensembling_scores,
+        method="Input Clarifaction Ensembling (aleatoric)",
+        short_name="input_clarifaction_ensembling",
+    )
 
 
-def eval_uncertainty(y_true: np.ndarray, y_scores: np.ndarray, method: str, short_name: str):
+def eval_uncertainty(
+    y_true: np.ndarray, y_scores: np.ndarray, method: str, short_name: str
+):
     """Evaluate and visualize uncertainty scores for ambiguity detection."""
     try:
         auroc = roc_auc_score(y_true, y_scores)
