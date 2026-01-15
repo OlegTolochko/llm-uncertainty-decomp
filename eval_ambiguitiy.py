@@ -5,11 +5,13 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import List
 from sentence_transformers import SentenceTransformer
+import torch
 
 from spectral_uncertainty import compute_spectral_uncertainty_from_embeddings
 from semantic_entropy import get_semantic_ids, cluster_assignment_entropy, EntailmentDeberta
 
 _model: SentenceTransformer | None = None
+DEVICE = "mps" if torch.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def load_results(json_file: str) -> list[dict]:
@@ -22,7 +24,7 @@ def get_model() -> SentenceTransformer:
     """Lazy load the sentence transformer model."""
     global _model
     if _model is None:
-        _model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
+        _model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2", device=DEVICE)
     return _model
 
 
@@ -70,14 +72,16 @@ def compute_spectral_scores(data: list[dict]) -> np.ndarray:
     return np.array(scores)
 
 
-def compute_semantic_entropy_scores(data: list[dict]) -> np.ndarray:
+def compute_input_clarification_ensembling_scores(data: list[dict]) -> np.ndarray:
     """Compute semantic entropy scores for all items."""
     model = EntailmentDeberta()
     scores = []
     for item in data:
         model_answers = item.get("model_answers", [])
         if model_answers and all(len(answers) > 0 for answers in model_answers):
-            ids = get_semantic_ids(model_answers, model)
+            # [n_clarifications][m_samples] -> [n_clarifications * m_samples]
+            flat_answers = [answer for answers in model_answers for answer in answers]
+            ids = get_semantic_ids(flat_answers, model)
             uncertainty = cluster_assignment_entropy(ids)
             scores.append(uncertainty)
         else:
@@ -103,9 +107,9 @@ def evaluate_ambiguity(json_file: str):
         short_name="spectral_aleatoric",
     )
 
-    print("\nComputing Semantic Entropy")
-    semantic_scores = compute_semantic_entropy_scores(data)
-    eval_uncertainty(y_true=y_true, y_scores=semantic_scores, method="Semantic Entropy", short_name="semantic_entropy")
+    print("\nComputing Input Clarifaction Ensembling Scores (using Semantic Entropy)")
+    input_clarifaction_ensembling_scores = compute_input_clarification_ensembling_scores(data)
+    eval_uncertainty(y_true=y_true, y_scores=input_clarifaction_ensembling_scores, method="Input Clarifaction Ensembling (aleatoric)", short_name="input_clarifaction_ensembling")
 
 
 def eval_uncertainty(y_true: np.ndarray, y_scores: np.ndarray, method: str, short_name: str):
@@ -140,4 +144,4 @@ def eval_uncertainty(y_true: np.ndarray, y_scores: np.ndarray, method: str, shor
 
 
 if __name__ == "__main__":
-    evaluate_ambiguity("out/ambigqa_results.json")
+    evaluate_ambiguity("out/results.json")
