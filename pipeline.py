@@ -4,14 +4,9 @@ import re
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from sentence_transformers import SentenceTransformer
-import numpy as np
-
 from llm_inference import inference
 from ambigqa import AmbigQAItem, load_ambigqa, filter_ambiguous, filter_unambiguous
 from sys_prompts import ambigqa_clarification_sys_prompt, ambigqa_target_sys_prompt
-
-model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
 
 
 @dataclass
@@ -21,8 +16,6 @@ class PipelineResult:
     query: str
     clarifications: List[str]
     model_answers: List[List[str]]  # [clarification][sample]
-    aleatoric: float
-    epistemic: float
 
     ground_truth_answers: List[str] = field(default_factory=list)
     is_ambiguous: bool = False
@@ -36,14 +29,7 @@ class PipelineResult:
             "clarifications": self.clarifications,
             "model_answers": self.model_answers,
             "ground_truth_answers": self.ground_truth_answers,
-            "aleatoric": float(self.aleatoric),
-            "epistemic": float(self.epistemic),
         }
-
-
-def embed_sentences(sentences: List[str]):
-    embeddings = model.encode(sentences)
-    return embeddings
 
 
 def generate_clarifications(
@@ -67,7 +53,12 @@ def process_clarifications(
     m: int,
     temperature: float,
     max_workers: int = 16,
-):
+) -> List[List[str]]:
+    """Generate m answer samples for each clarification.
+    
+    Returns:
+        all_outputs_text: List of lists, shape [n_clarifications][m_samples]
+    """
     n = len(clarifications)
 
     def call_one(i: int, j: int) -> Tuple[int, int, str]:
@@ -89,38 +80,7 @@ def process_clarifications(
             i, j, text = fut.result()
             all_outputs_text[i][j] = text
 
-    all_outputs_embedded = []
-    similarity_matrices = []
-    similarity_eigenvalues = []
-
-    for i in range(n):
-        outputs_text = all_outputs_text[i]
-        outputs_embedded = embed_sentences(outputs_text)
-        similarity_matrix = compute_similarity_matrix(outputs_embedded)
-
-        sim_matrix_norm = (1 / outputs_embedded.shape[0]) * similarity_matrix
-        sim_eig_values = np.linalg.eigvalsh(sim_matrix_norm)
-        sim_eig_values = np.maximum(sim_eig_values, 1e-10)
-
-        all_outputs_embedded.append(outputs_embedded)
-        similarity_matrices.append(similarity_matrix)
-        similarity_eigenvalues.append(sim_eig_values)
-
-    return (
-        all_outputs_embedded,
-        all_outputs_text,
-        similarity_matrices,
-        similarity_eigenvalues,
-    )
-
-
-def compute_similarity_matrix(outputs_embedded: List[np.ndarray], gamma: float = 1.0):
-    outputs_arr = np.asarray(outputs_embedded)[:, np.newaxis, :]  # (m, 1, embed_dim)
-    outputs_arr_t = np.transpose(outputs_arr, (1, 0, 2))  # (1, m, embed_dim)
-    element_wise_diff = outputs_arr - outputs_arr_t  # (m, m, embed_dim)
-    dist_sq = np.sum(element_wise_diff**2, axis=2)
-    sim_matrix = np.exp(-gamma * dist_sq)  # (m, m)
-    return sim_matrix
+    return all_outputs_text
 
 
 def parse_ambigqa_response(response_text: str, original_query: str) -> List[str]:
@@ -172,53 +132,22 @@ def process_ambigQA(
     return W_clarifications
 
 
-def process_outer_loop(all_outputs_embedded: List[np.ndarray], gamma: float = 1.0):
-    flattened_embeddings = np.vstack(all_outputs_embedded)  # (n*m, embed_dim)
-    nm = flattened_embeddings.shape[0]
-
-    K_out = compute_similarity_matrix(flattened_embeddings, gamma=gamma)
-    K_out_norm = (1 / nm) * K_out
-    outer_eigenvalues = np.linalg.eigvalsh(K_out_norm)
-    outer_eigenvalues = np.maximum(outer_eigenvalues, 1e-10)
-
-    return outer_eigenvalues
-
-
-def compute_uncertainties(
-    inner_eigenvalues: List[np.ndarray], outer_eigenvalues: np.ndarray, n: int
-):
-    aleatoric = (1 / n) * (
-        np.sum(inner_eigenvalues * np.log(inner_eigenvalues))
-    ) - np.sum(outer_eigenvalues * np.log(outer_eigenvalues))
-    epistemic = -(1 / n) * np.sum(inner_eigenvalues * np.log(inner_eigenvalues))
-    return aleatoric, epistemic
-
-
 def pipeline(query: str, sys_prompt_clarify: str, sys_prompt_answer: str):
+    """Simple pipeline for a single query."""
     W_clarifications = process_ambigQA(query, sys_prompt_clarify)
 
-    all_outputs_embedded, all_outputs_text, inner_matrices, inner_eigenvalues = (
-        process_clarifications(
-            clarifications=W_clarifications,
-            sys_prompt=sys_prompt_answer,
-            m=3,
-            target_llm="google/gemini-3-flash-preview",
-        )
+    all_outputs_text = process_clarifications(
+        clarifications=W_clarifications,
+        sys_prompt=sys_prompt_answer,
+        m=3,
+        target_llm="google/gemini-3-flash-preview",
+        temperature=0.5,
     )
-    outer_eigenvalues = process_outer_loop(all_outputs_embedded)
-    n = len(all_outputs_embedded)
-    aleatoric, epistemic = compute_uncertainties(
-        inner_eigenvalues=inner_eigenvalues, outer_eigenvalues=outer_eigenvalues, n=n
-    )
-    print(f"Aleatoric Uncertainty: {aleatoric}")
-    print(f"Epistemic Uncertainty: {epistemic}")
 
     return PipelineResult(
         query=query,
         clarifications=W_clarifications,
         model_answers=all_outputs_text,
-        aleatoric=aleatoric,
-        epistemic=epistemic,
     )
 
 
@@ -231,7 +160,7 @@ def pipeline_on_ambigqa_item(
     m: int = 3,
     temperature: float = 0.5,
 ) -> PipelineResult:
-    """Run the uncertainty pipeline on a single AmbigQA item."""
+    """Run the pipeline on a single AmbigQA item."""
 
     # 1: Generate clarifications from the original question
     W_clarifications = process_ambigQA(
@@ -239,31 +168,18 @@ def pipeline_on_ambigqa_item(
     )
 
     # 2: Get m samples for each clarification
-    all_outputs_embedded, all_outputs_text, _, inner_eigenvalues = (
-        process_clarifications(
-            clarifications=W_clarifications,
-            sys_prompt=sys_prompt_answer,
-            target_llm=target_llm,
-            m=m,
-            temperature=temperature,
-        )
-    )
-
-    # 3: Compute outer similarity
-    outer_eigenvalues = process_outer_loop(all_outputs_embedded)
-
-    # 4: Compute uncertainties
-    n = len(all_outputs_embedded)
-    aleatoric, epistemic = compute_uncertainties(
-        inner_eigenvalues=inner_eigenvalues, outer_eigenvalues=outer_eigenvalues, n=n
+    all_outputs_text = process_clarifications(
+        clarifications=W_clarifications,
+        sys_prompt=sys_prompt_answer,
+        target_llm=target_llm,
+        m=m,
+        temperature=temperature,
     )
 
     return PipelineResult(
         query=item.question,
         clarifications=W_clarifications,
         model_answers=all_outputs_text,
-        aleatoric=aleatoric,
-        epistemic=epistemic,
         ground_truth_answers=item.all_answers,
         is_ambiguous=item.is_ambiguous,
         item_id=item.id,
@@ -335,8 +251,7 @@ def run_ambigqa_evaluation(
 
             print(f"  Ambiguous: {result.is_ambiguous}")
             print(f"  Clarifications: {len(result.clarifications)}")
-            print(f"  Aleatoric: {result.aleatoric:.4f}")
-            print(f"  Epistemic: {result.epistemic:.4f}")
+            print(f"  Answers per clarification: {len(result.model_answers[0]) if result.model_answers else 0}")
 
         except Exception as e:
             print(f"  ERROR: {e}")
@@ -355,18 +270,8 @@ def run_ambigqa_evaluation(
         ambig_results = [r for r in results if r.is_ambiguous]
         unambig_results = [r for r in results if not r.is_ambiguous]
 
-        if ambig_results:
-            avg_aleatoric = np.mean([r.aleatoric for r in ambig_results])
-            avg_epistemic = np.mean([r.epistemic for r in ambig_results])
-            print(f"Ambiguous ({len(ambig_results)} items):")
-            print(f"  Avg Aleatoric: {avg_aleatoric:.4f}")
-            print(f"  Avg Epistemic: {avg_epistemic:.4f}")
-
-        if unambig_results:
-            avg_aleatoric = np.mean([r.aleatoric for r in unambig_results])
-            avg_epistemic = np.mean([r.epistemic for r in unambig_results])
-            print(f"Unambiguous ({len(unambig_results)} items):")
-            print(f"  Avg Aleatoric: {avg_aleatoric:.4f}")
-            print(f"  Avg Epistemic: {avg_epistemic:.4f}")
+        print(f"Ambiguous: {len(ambig_results)} items")
+        print(f"Unambiguous: {len(unambig_results)} items")
+        print(f"Total: {len(results)} items")
 
     return results
