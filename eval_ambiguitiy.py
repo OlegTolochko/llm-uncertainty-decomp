@@ -140,4 +140,4 @@ def eval_uncertainty(y_true: np.ndarray, y_scores: np.ndarray, method: str, shor
 
 
 if __name__ == "__main__":
-    evaluate_ambiguity("out/results.json")
+    evaluate_ambiguity("out/ambigqa_results.json")
